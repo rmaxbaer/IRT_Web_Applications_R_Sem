@@ -1,0 +1,720 @@
+---
+title: "Shiny (Question 4)"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(scales)
+library(plyr)
+library(magrittr)
+library(stringr)
+library(kableExtra)
+library(rlist)
+library(zoo) #index
+library(data.table) # fread
+library(PCIT)
+library(psychometric)
+```
+
+```{r}
+#install.packages("knitr")
+#install.packages("scales")
+#install.packages("plyr")
+#install.packages("rlist")
+#install.packages("zoo")
+#install.packages("PCIT")
+#install.packages("kableExtra")
+#install.packages("DT")
+#install.packages("ggplot2")
+```
+
+First we read in the data.  We add a date column that is in the "school year" format (ie. '2017-2018'). 
+- This chunk attempts to remove duplicates by removing any duplicate record of a student ID taking the same test more than once in a year.
+- The data set is large, so we make smaller copies to work with that do not hold all of the variables.  
+```{r, include=FALSE}
+# Read in csv:
+file_list <- list.files(path = "~/TestAnalysisShiny/data/alldata",  pattern = "*.csv")
+if(length(file_list) > 1){
+ df_list <- lapply(file_list, fread, stringsAsFactors = FALSE, data.table = FALSE )
+ data <- rbind.fill(df_list)
+}else{
+ data <- fread(path.expand(paste("~/TestAnalysisShiny/data/alldata/", list.files(path =   "~/TestAnalysisShiny/data/alldata",  pattern = "*.csv"), sep = "")), stringsAsFactors = FALSE, data.table = FALSE)
+}
+
+#This removes the record of the same student taking the same test in one year
+data$TEST_DATE <- as.Date.factor(data$TEST_DATE)
+data <- data[order(data$TEST_DATE),]
+data <- data[!duplicated(data[c("TEST_ID","PERSON_ID")]),]
+
+# This keeps only certain columns that we want to work with
+#ourdata <- data[, c(3:6, 8:9, 21, 25:78)]
+ourdata <- data[, c(3, 5, 8:9, 21, 25:78)]
+
+# This creates a column for the year, in the format: "2017-2018"
+ourdata$Month <- as.numeric(str_sub(string = ourdata$TEST_DATE, start = 6, end = 7))
+ourdata$Year <-as.numeric(str_sub(string= ourdata$TEST_DATE, start=0, end=4))
+school_year <- function(t) {
+    ifelse(t < 8, (paste((ourdata$Year-1), ourdata$Year, sep = "-")), (paste(ourdata$Year, (ourdata$Year +1), sep = "-")))
+  }
+ourdata$SCHOOL_YEAR <- school_year(ourdata$Month)
+#ba_Data <- ourdata[which(ourdata$TEST_ID %in% c(11:18)), c(1, 3:4, 7, 64, 8:61)]
+#ourdata <- ourdata[, c(3, 5, 1, 7, 6, 2, 62:64)]
+ba_Data <- ourdata[which(ourdata$TEST_ID %in% c(11:18)), c(1:5, 62, 6:32)]
+ourdata <- ourdata[, c(1:5, 62, 6:59)]
+```
+
+
+
+THIS SECTION IS FOR ALL ASSESSMENTS OTHER THAN BELIEF AND APPLY
+
+The next several chunks don't deal with "Belief and Apply" exams.  We'll deal with those later.
+For now, this reads in the keys for all of the other exams.  They should be in the same folder ("TestAnalysisShiny/data")
+  and should be named by Test ID (ie. "2.csv").
+```{r}
+# This reads in all the csv files in the current directory, which must be entered in the first chunk, line 9 ^ ^
+setwd("~/TestAnalysisShiny/data")
+file_list <- list.files(path = "~/TestAnalysisShiny/data",  pattern = "*.csv")
+
+# Read in the answer keys only pertaining to the tests for which we have student data
+#t <- aggregate(SCORE ~ TEST_ID, data = data, FUN = NROW)
+t <- aggregate(SCORE ~ TEST_ID, data = ourdata, FUN = NROW)
+#tests_taken <- t$TEST_ID
+tests_taken <- t$TEST_ID %>% 
+  as.numeric() %>%
+  sort()
+keep <- which(as.numeric(sub('\\..*', '', file_list)) %in% tests_taken)
+df_list <- lapply(file_list[keep], fread, stringsAsFactors = FALSE, data.table = FALSE )
+```
+
+
+```{r}
+# All csv files must be named "*testID*.csv", respectively.  This then pulls the testID's
+names(df_list) <- as.numeric(sub('\\..*', '', file_list[keep]))
+
+# This makes a list of the Test IDs, and the number of tests for each; making a matrix of test indices which functions can be applied over
+test_Ids <- as.numeric(names(df_list))
+num_Tests <- length(test_Ids)
+test_lindex <- c(1:num_Tests)
+test_index <- as.matrix(test_lindex)
+
+# This makes a list of lists, each containing the keys for a test
+list_ansrKeys <- function(x){
+  ans_key <- x[!duplicated(x["Code"]),]
+  ans_key[(ans_key$ItemType == "MC"), "CorrectOption"]
+}
+
+keys <- llply(df_list, list_ansrKeys)
+
+# This function makes a list of 76 dfs, which each contain student responses
+fx_extractResp <- function(x){
+  ID <- test_Ids[x]
+  len <- length(keys[[x]])
+  stud_ans <- ourdata[ourdata$TEST_ID == ID, c(7:(6 + len))]
+  #stud_ans <- data[data$TEST_ID == ID, c(25:(24 + len))]
+  if(NROW(stud_ans == 1)){
+    stud_ans[2,] <- stud_ans[1,]
+  }
+  stud_ans
+}
+
+stud_responses <- apply(test_index, MARGIN = 1, fx_extractResp)
+# This takes the responses, cuts the number that was chosen, and gets rid of NA's
+# It also gets rid of tests who have 25% or more NA
+cut_num <- function(x){
+  if(is.na(x) == TRUE){
+    x <- 0
+  }else if(x == ''){
+    x <- 9
+  }else(
+  x <- as.numeric(str_sub(string = x, start = 2, end = 2 ))
+  )
+  
+  if(x>3){
+    x <- 8
+  }else(x <- x)
+}
+
+nested_func <- function(x){
+    stud_ans <- as.data.frame(apply(x, MARGIN = c(1,2), FUN = cut_num))
+    stud_ans <- stud_ans[rowSums(is.na(stud_ans)) < (ncol(x)/4),]
+    stud_ans[is.na(stud_ans)] <- 0
+    stud_ans
+}
+
+stud_answers <- lapply(stud_responses, nested_func)
+
+# This compares the responses to the answer keys
+fx_grader <- function(x){
+  df<- data.frame(stud_answers[[x]]) 
+  t_key <- keys[[x]]
+  t(apply(df, 1, function(x) x == t_key))
+}
+
+stud_tf <- apply(test_index, MARGIN = 1, fx_grader )
+
+#  If needed, this gives a list of all the scores for the tests' MC
+   test_scores <- laply(stud_tf, mean)
+
+
+# This function makes a list of 76 df's, which each contain the Qtext, the correct Ans, and a column for each anstext
+fx_analysis <- function(x){
+  df <- x[!duplicated(x["Code"]),]
+  df[(df$ItemType == "MC"), c("ItemText", "CorrectOption", "Option1", "Option2", "Option3")]
+}
+
+quest_analysis <- llply(df_list, fx_analysis)
+
+
+fx_percent <- function(x){
+  round(100*x, 2)
+}
+
+# This function creates a list of dataframes that contain information about how students repsonded to each question
+
+fx_addstats <- function(x){
+  tf <- stud_tf[[x]]
+  ans <- stud_answers[[x]]
+  n_Resp <- NROW(tf)
+  
+  ans_one <- apply(ans, MARGIN = c(1,2), function(y) y == 1 )
+  ans_one <- as.data.frame(ans_one)
+  one_Score <- colSums(ans_one)
+  
+  ans_two <- apply(ans, MARGIN = c(1,2), function(y) y == 2 )
+  ans_two <- as.data.frame(ans_two)
+  two_Score <- colSums(ans_two)
+  
+  ans_three <- apply(ans, MARGIN = c(1,2), function(y) y == 3 )
+  ans_three <- as.data.frame(ans_three)
+  three_Score <- colSums(ans_three)
+  
+  q_Num <- 1:NCOL(ans)
+  q_Score <- fx_percent(colMeans(tf))
+  
+  
+  df <- cbind(q_Num, one_Score, two_Score, three_Score, q_Score)
+  df <- as.data.frame(df)
+}
+quest_Dfs <- llply(test_index, fx_addstats)
+  # Now what we need to do is take our quest_Dfs and combine them with our quest_analysis Df's
+
+fx_combine <- function(x){
+  comb <- cbind(quest_analysis[[x]], quest_Dfs[[x]]) 
+  ID <- rep(test_Ids[x], NROW(comb))
+  comb$TestID <- as.numeric(ID)
+  as.data.frame(comb)
+}
+merged_Dfs <- llply(test_index, fx_combine)
+```
+
+```{r}
+df_Merged <- rbind.fill(merged_Dfs)
+
+fx_Distractor <- function(x){
+  op <- as.numeric(x[2])
+  ans_Text <- x[(op + 2)]
+  if(op == 1){
+    num_Cor <- x[7]
+    d_score1 <- x[8]
+    d1 <- x[4]
+    d_score2 <- x[9]
+    d2 <- x[5]
+  }else if(op == 2){
+    num_Cor <- x[8]
+    d_score1 <- x[7]
+    d1 <- x[3]
+    d_score2 <- x[9]
+    d2 <- x[5]
+  }else {
+    num_Cor <- x[9]
+    d_score1 <- x[7]
+    d1 <- x[3]
+    d_score2 <- x[8]
+    d2 <- x[4]
+    }
+  
+  if(d_score1 > d_score2){
+    cbind(x[11], x[6], x[10], x[1], ans_Text, num_Cor, d1, d_score1, d2, d_score2)
+  }else{
+    cbind(x[11], x[6], x[10], x[1], ans_Text, num_Cor, d2, d_score2, d1, d_score1)
+  }
+}
+
+df_Combined <- apply(df_Merged, MARGIN = 1, FUN = fx_Distractor)
+df_Combined <- as.data.frame(t(df_Combined))
+colnames(df_Combined) <- c("TEST_ID", "Q #", "Score", "Text", "Answer", "#", "Distractor 1", "#1", "Distractor 2", "#2")
+df_Combined$TEST_ID <- as.numeric(as.character(df_Combined$TEST_ID))
+
+for(i in 1:3){
+  x <- (i*2) + 4
+  y <- 10 + i
+df_Combined[, x] <- as.numeric(as.character(df_Combined[, x]))
+}
+
+df_Combined$Score1 <- round(df_Combined[, 8] / (df_Combined[, 6] + df_Combined[, 8] + df_Combined[, 10]), 2)
+df_Combined$Score2 <- round(df_Combined[, 10] / (df_Combined[, 6] + df_Combined[, 8] + df_Combined[, 10]), 2)
+df_Combined$NResp <- df_Combined[, 6] + df_Combined[, 8] + df_Combined[, 10]
+```
+
+```{r}
+fx_TestType <- function(x){
+    TYPE <- numeric(length = (NROW(x)))
+    x$TEST_ID <- as.numeric(x$TEST_ID)
+    for (i in 1:NROW(x)) {
+          ID <- x$TEST_ID[i]
+          if(ID < 9 ){
+               TYPE[i] <- "Learning Assessment"
+            }else if (ID < 19 & ID > 10 ) {
+              TYPE[i] <- "Belief And Apply" 
+            }else if (ID == 100|ID == 200 | ID == 1101 | ID == 2201){
+              TYPE[i] <- "Doctrinal Topics"
+            }else if (ID > 100 & ID < 133 | ID >700 & ID < 736){
+              TYPE[i] <- "Weekly Review"
+            }else if (ID == 500 | ID == 600 | ID == 700 | ID == 800 | ID == 22 ){
+              TYPE[i] <- "Pre-Assessments"
+            }
+            else {
+              TYPE[i] <- "Other"
+            }
+    }
+    cbind(x, TYPE)
+}
+
+df_Combined <-  fx_TestType(df_Combined)
+ourdata2 <- fx_TestType(ourdata)
+```
+
+
+EVERYTHING ABOVE HERE DEALS WITH THE LEARNING ASSESSMENTS THAT AREN'T BELIEF AND APPLY
+
+EVERYTHING BELOW HERE IS THE BELIEF AND APPLY ASSESSMENT PORTION
+
+
+```{r}
+# This chunk will create a report for the most missed questions for Learning Assessments 
+# This reads in all the csv files in the current directory, which must be entered in the first chunk, line 9 ^ ^
+setwd("~/TestAnalysisShiny/data/beliefapply")
+BAfile_list <- list.files(path = "~/TestAnalysisShiny/data/beliefapply",  pattern = "*.csv")
+
+# Read in the answer keys only pertaining to the tests for which we have student data
+t <- aggregate(SCORE ~ TEST_ID, data = data, FUN = NROW)
+tests_taken <- t$TEST_ID
+tests_taken <- tests_taken[as.numeric(tests_taken) > 10 & as.numeric(tests_taken) < 19]
+keep <- which(as.numeric(sub('\\..*', '', BAfile_list)) %in% tests_taken)
+BAdf_list <- lapply(BAfile_list[keep], fread, stringsAsFactors = FALSE, data.table = FALSE )
+# All csv files must be named "*testID*.csv", respectively.  This then pulls the testID's
+names(BAdf_list) <- as.numeric(sub('\\..*', '', BAfile_list[keep]))
+# Make a list of the Test IDs, and the number of tests for each; make a matrix of test indices which functions can be applied over
+ba_Ids <- as.numeric(names(BAdf_list))
+num_Tests <- length(ba_Ids)
+test_lindex <- c(1:num_Tests)
+ba_Index <- as.matrix(test_lindex)
+
+# This makes a list of lists, each containing the doctrines for a test
+fx_Doctrines <- function(x){
+  keep_Cols <- which((str_sub(string = colnames(x), start = 1, end = 3 )) == "Row")
+  l <- as.data.frame(t(x[c(1:2), keep_Cols]))
+  n_Bel <- sum(l[, 1] != "")
+  n_App <- sum(l[, 2] != "")
+ 
+  df <- data.frame(Doctrine = unlist(l))
+  df <- df[df != "",]
+  doc <- data.frame(df, c(rep("Belief", n_Bel), rep("Apply", n_App)))
+}
+
+ba_Doctrines <- llply(BAdf_list, fx_Doctrines)
+
+# This function makes a list of 76 dfs, which each contain student responses
+fx_extractResp <- function(x){
+  ID <- ba_Ids[x]
+  len <- NROW(ba_Doctrines[[x]])
+  stud_ans <- ourdata[ourdata$TEST_ID == ID, c(7:(6 + len))]
+  #stud_ans <- data[data$TEST_ID == ID, c(25:(24 + len))]
+  if(NROW(stud_ans) == 1){
+    stud_ans[2,] <- stud_ans[1,]
+  }
+  stud_ans
+}
+
+ba_Responses <- apply(ba_Index , MARGIN = 1, fx_extractResp)
+```
+
+
+```{r}
+# This chunk results in one list of "Belief" Data Frames, and one list of "Apply" Data Frames, one of each for each test
+# Each Data frame contains all of the student's responses pertaining to each doctrine for that test
+
+# We need to make sure that these symbols aren't deleted as we close and open RStudio- sometimes I come back and one of the symbols is just gone
+
+#str_extract_all(x, regex(pattern = "\\?....", dotall = TRUE, ignore_case = TRUE))
+
+#"I this is true.Â§(D)know||How much do you care about this doctrine?Â§(H)It is very important to me."
+
+#my_Pattern <- "Â§..."
+my_Pattern <- "Â§..."
+
+# These functions make a list of the A-D answers
+fx_Abcd <- function(x){
+  
+    if(is.na(x) == TRUE){
+      x <- "NA"
+    }else if(x == ''){
+      x <- "EMPTY"
+    }else{
+      
+      #ba_String <- str_extract_all(x, my_Pattern)
+      ba_String <- str_extract_all(x, "\\(." )
+      resp <- str_sub(string = ba_String[[1]], start = 2, end = 2)
+      
+      if(resp[1] > "D"){
+        if(length(resp) > 1 && resp[2] < "E"){
+          x <- resp[2]
+        }else{x <- "ERROR"}  # For "Important", this means that it only has an E-H (or two?)
+      }else{x <- resp[1]}
+    }
+}
+
+fx_FirstBa <- function(x){
+  as.data.frame(apply(x, MARGIN = c(1, 2), FUN = fx_Abcd))
+}         
+
+# These functions make dataframes of all of the E-H answers
+fx_Efgh <- function(x){
+  
+    if(is.na(x) == TRUE){
+      x <- "NA"
+    }else if(x == ''){
+      x <- "EMPTY"
+    }else{
+      #ba_String <- str_extract_all(x, my_Pattern)
+      ba_String <- str_extract_all(x, "\\(." )
+      resp <- str_sub(string = ba_String[[1]], start = 2, end = 2)
+      
+      if(resp[1] < "E"){
+        if(length(resp) > 1 & resp[2] > "D"){
+          x <- resp[2]
+        }else{x <- "ERROR"}  # For "Know", this means that it only has an A-D (or two?)
+      }else{x <- resp[1]}
+    }
+}
+
+fx_SecondBa <- function(x){
+  as.data.frame(apply(x, MARGIN = c(1, 2), FUN = fx_Efgh))
+}         
+
+
+ba_Abcd <- lapply(ba_Responses, fx_FirstBa)
+ba_Efgh <- lapply(ba_Responses, fx_SecondBa)
+```
+
+```{r}
+fx_BaCombine <- function(x){
+  
+ df <- as.data.frame(ba_Doctrines[[x]])
+ # add a list that will become the care column
+ q_Split <- sum(df[, 2] == "Belief" )
+ q_Num <- q_Split + sum(df[, 2] == "Apply")
+ 
+ a_List <- colSums(ba_Abcd[[x]] == "A")
+ b_List <- colSums(ba_Abcd[[x]] == "B")
+ c_List <- colSums(ba_Abcd[[x]] == "C")
+ d_List <- colSums(ba_Abcd[[x]] == "D")
+
+ e_List <- colSums(ba_Efgh[[x]] == "E")
+ f_List <- colSums(ba_Efgh[[x]] == "F")
+ g_List <- colSums(ba_Efgh[[x]] == "G")
+ h_List <- colSums(ba_Efgh[[x]] == "H")
+ 
+
+ care_1 <- c(h_List[1:q_Split], d_List[(q_Split+1):q_Num])
+ care_2 <- c(g_List[1:q_Split], c_List[(q_Split+1):q_Num])
+ care_3 <- c(f_List[1:q_Split], b_List[(q_Split+1):q_Num])
+ care_4 <- c(e_List[1:q_Split], a_List[(q_Split+1):q_Num])
+ 
+ bel_1 <- c(d_List[1:q_Split], rep(1000, (q_Num - q_Split)))
+ bel_2 <- c(c_List[1:q_Split], rep(1000, (q_Num - q_Split)))
+ bel_3 <- c(b_List[1:q_Split], rep(1000, (q_Num - q_Split)))
+ bel_4 <- c(a_List[1:q_Split], rep(1000, (q_Num - q_Split)))
+ 
+ app_1 <- c(rep(1000, q_Split), h_List[(q_Split+1):q_Num])
+ app_2 <- c(rep(1000, q_Split), g_List[(q_Split+1):q_Num])
+ app_3 <- c(rep(1000, q_Split), f_List[(q_Split+1):q_Num])
+ app_4 <- c(rep(1000, q_Split), e_List[(q_Split+1):q_Num]) 
+ 
+ ID <- rep(ba_Ids[x], q_Num)
+ 
+ colnames(df) <- c("Doctrine", "Type")
+ y <- as.data.frame(cbind(ID, df, care_1, care_2, care_3, care_4, bel_1, bel_2, bel_3, bel_4, app_1, app_2, app_3, app_4))
+ 
+ y$Care_Score <- ((y$care_1*4) + (y$care_2*3) + (y$care_3*2) + (y$care_4*1) ) / (y$care_1 + y$care_2 + y$care_3 + y$care_4)
+
+ 
+ y$BA_score <- c(1:q_Num)
+ 
+  for (i in 1:q_Num) {
+    if(i < (q_Split +1)){
+      
+      y$BA_score[i] <- ((y$bel_1[i] *4) + (y$bel_2[i]*3) + (y$bel_3[i]*2) + (y$bel_4[i]*1) ) / (y$bel_1[i] + y$bel_2[i] + y$bel_3[i] + y$bel_4[i])
+      
+    }else{
+      y$BA_score[i] <- ((y$app_1[i] *4) + (y$app_2[i]*3) + (y$app_3[i]*2) + (y$app_4[i]*1) ) / (y$app_1[i] + y$app_2[i] + y$app_3[i] + y$app_4[i])
+    }
+  }
+ y
+}
+ba_Combined <- 0
+ba_Combined <- apply(ba_Index , MARGIN = 1, fx_BaCombine)
+```
+
+
+```{r}
+# This gives the "Scores" for each test
+fx_BaScores <- function(x){
+  ID <- ba_Ids[x]
+  df <- ba_Combined[[x]]
+  score_Care <- mean(df$Care_Score)
+  score_Bel <- mean(df$BA_score[df$Type == "Belief"])
+  score_App <- mean(df$BA_score[df$Type == "Apply"])
+  as.data.frame(cbind(ID, score_Care, score_Bel, score_App))
+}
+ba_Scores <- apply(ba_Index , MARGIN = 1, fx_BaScores)
+df_BaScore <- rbind.fill(ba_Scores)
+
+```
+
+
+```{r}
+# Above we have a dataframe with just averages for each test, let's make dfs for each one comparing care to bel and app
+
+fx_BelComb <- function(x){
+  x$Num <- 1:NROW(x)
+  x[x$Type == "Belief", c(1:11,  16:18)]
+  
+}
+list_Belief <- llply(ba_Combined, fx_BelComb)
+
+fx_AppComb <- function(x){
+  x$Num <- 1:NROW(x)
+  x[x$Type == "Apply", c(1:7, 12:18)]
+}
+list_Apply <- llply(ba_Combined, fx_AppComb)
+
+df_CombBelief <- rbind.fill(list_Belief)
+df_CombApply <- rbind.fill(list_Apply)
+
+list_BaData <- list(df_BaScore, df_CombBelief, df_CombApply)
+
+colnames(df_CombBelief)[8:11] <- c("BelApp_1", "BelApp_2", "BelApp_3", "BelApp_4")
+
+colnames(df_CombApply)[8:11] <- c("BelApp_1", "BelApp_2", "BelApp_3", "BelApp_4")
+
+df_BaMerged <- rbind.fill(df_CombApply, df_CombBelief)
+
+```
+
+
+```{r}
+fx_BATest <- function(x){
+    Name <- numeric(length = (NROW(x)))
+    x$ID <- as.numeric(x$ID)
+    for (i in 1:NROW(x)) {
+          ID <- x$ID[i]
+          if(ID == 11 ){
+               Name[i] <- "Old Testament 1 (Gen-Ruth)"
+            }else if (ID == 12 ) {
+              Name[i] <- "Old Testament 2 (1Sam-Mal)" 
+            }else if (ID == 13){
+              Name[i] <- "New Testament 1 (Mat-John)"
+            }else if (ID == 14){
+              Name[i] <- "New Testament 2 (Acts-Rev)"
+            }else if (ID == 15){
+              Name[i] <- "BOM 1 (Nep-Alm)"
+            }else if (ID == 16){
+              Name[i] <- "BOM 2(Alm-Mor)"
+            }else if (ID == 17){
+              Name[i] <- "D&C 1 (1-75)"
+            }else if (ID == 18){
+              Name[i] <- "D&C 2"
+            }else {
+              Name[i] <- "Other"
+            }
+    }
+    cbind(x, Name)
+}
+
+df_BALong <- fx_BATest(df_BaMerged)
+```
+
+
+
+
+```{r}
+choices_df <-  data.frame(
+names <-  c("All", "Old Testament 1 (Gen-Ruth)", "Old Testament 2 (1Sam-Mal)", "New Testament 1 (Mat-John)", "New Testament 2 (Acts-Rev)", "BOM 1 (Nep-Alm)", "BOM 2(Alm-Mor)", "D&C 1 (1-75)", "D&C 2"),
+id <- 10:18)
+colnames(choices_df) <- c("names", "ID")
+
+
+df_Scatter <- data.frame(
+  names <- c("Importance Level", "Belief Level", "Application Level"),
+  id <- 1:3)
+colnames(df_Scatter) <- c("names", "ID")
+```
+
+
+
+```{r}
+  my_BAData <- df_BALong
+  
+  for(i in 1:NROW(my_BAData)){
+    my_BAData$Num_care[i] <- sum(my_BAData[i, c(4:7)])
+    my_BAData$Num_BelApp[i] <- sum(my_BAData[i, c(8:11)])
+  }
+  
+  
+  for(i in 1:NROW(df_BALong)){
+    for(n in 1:8){
+      n <- n + 3
+      if(n < 8){
+        my_BAData[i, n] <- round((my_BAData[i,n] / my_BAData$Num_care[i]), 2)
+      }else{
+        my_BAData[i, n] <- round((my_BAData[i, n] / my_BAData$Num_BelApp[i]), 2)
+      }
+    }
+  }
+  
+  colnames(my_BAData)[4:7] <- c("Very Important", "Important", "Somewhat Important", "Not Important")
+  
+  my_BAData$BA_score <- round(my_BAData$BA_score , 2)
+  my_BAData$Care_Score <- round(my_BAData$Care_Score, 2)
+  
+  my_AppData <- my_BAData[as.character(my_BAData$Type) == "Apply", c(15, 14, 2, 4:11) ]
+  my_BelData <- my_BAData[as.character(my_BAData$Type) == "Belief", c(15, 14, 2, 4:11) ]
+  
+  colnames(my_AppData)[8:11] <- c("Always", "Almost Always", "Sometimes", "Rarely or Never")
+  colnames(my_BelData)[8:11] <- c("Know", "Believe", "Sort of believe", "Don't know if")
+```
+
+###  EXPERIMENTAL Belief and Apply vvv 
+
+```{r}
+combAr <- subset(data, data$TEST_ID %in% ba_Ids)
+areas <- as.matrix(unique(combAr$AREA))
+areaInd <- as.matrix(1:length(areas))
+
+fx_AreaBA <- function(x){
+  
+  area <<- areas[x]
+  
+  fx_extractResp <<- function(x){
+    ID <- ba_Ids[x]
+    len <- NROW(ba_Doctrines[[x]])
+    stud_ans <- data[data$TEST_ID == ID, c(21, 25:(24 + len))]
+    stud_ans <- stud_ans[stud_ans$AREA == area, 2:NCOL(stud_ans) ]
+    if(NROW(stud_ans) == 1){
+      stud_ans[2,] <- stud_ans[1,]
+    }else if(NROW(stud_ans) == 0){
+      stud_ans[1,] <- NA
+      #stud_ans[1, 1] <- area
+    }else{stud_ans <- stud_ans}
+    stud_ans
+  }
+
+  ba_Responses <<- apply(ba_Index , MARGIN = 1, fx_extractResp)
+  
+  ba_Abcd <<- lapply(ba_Responses, fx_FirstBa)
+  ba_Efgh <<- lapply(ba_Responses, fx_SecondBa)
+  
+  ba_Combined <<- 0
+  ba_Combined <<- apply(ba_Index , MARGIN = 1, fx_BaCombine)
+  
+  
+  
+  list_Belief <<- llply(ba_Combined, fx_BelComb)
+  list_Apply <<- llply(ba_Combined, fx_AppComb)
+  
+  df_CombBelief <<- rbind.fill(list_Belief)
+  df_CombApply <<- rbind.fill(list_Apply)
+  
+  colnames(df_CombBelief)[8:11] <<- c("BelApp_1", "BelApp_2", "BelApp_3", "BelApp_4")
+
+  colnames(df_CombApply)[8:11] <<- c("BelApp_1", "BelApp_2", "BelApp_3", "BelApp_4")
+
+  df_BaMerged <<- rbind.fill(df_CombApply, df_CombBelief)
+  
+  df_BALong <<- fx_BATest(df_BaMerged)
+  
+  Area_BAData <<- df_BALong
+  
+  for(i in 1:NROW(Area_BAData)){
+    Area_BAData$Num_care[i] <- sum(Area_BAData[i, c(4:7)])
+    Area_BAData$Num_BelApp[i] <- sum(Area_BAData[i, c(8:11)])
+  }
+  
+  
+  for(i in 1:NROW(df_BALong)){
+    for(n in 1:8){
+      n <- n + 3
+      if(n < 8){
+        Area_BAData[i, n] <- round((Area_BAData[i,n] / Area_BAData$Num_care[i]), 2)
+      }else{
+        Area_BAData[i, n] <- round((Area_BAData[i, n] / Area_BAData$Num_BelApp[i]), 2)
+      }
+    }
+  }
+  
+  colnames(Area_BAData)[4:7] <- c("Very Important", "Important", "Somewhat Important", "Not Important")
+  
+  Area_BAData$BA_score <- round(Area_BAData$BA_score , 2)
+  Area_BAData$Care_Score <- round(Area_BAData$Care_Score, 2)
+  
+  my_AppData <- Area_BAData[as.character(Area_BAData$Type) == "Apply", c(15, 14, 2, 4:11) ]
+  my_BelData <- Area_BAData[as.character(Area_BAData$Type) == "Belief", c(15, 14, 2, 4:11) ]
+  
+  colnames(my_AppData)[8:11] <- c("Always", "Almost Always", "Sometimes", "Rarely or Never")
+  colnames(my_BelData)[8:11] <- c("Know", "Believe", "Sort of believe", "Don't know if")
+  
+  Area_BAData
+  
+  
+}
+#area_List <- apply(areaInd, MARGIN = 1, fx_AreaBA) <- this has some bugs, we can work this out if we need to 
+#View(area_List[[1]])
+#View(area_List[[2]])
+```
+
+```{r}
+choices_df <-  data.frame(
+names <-  c("All", "Old Testament 1 (Gen-Ruth)", "Old Testament 2 (1Sam-Mal)", "New Testament 1 (Mat-John)", "New Testament 2 (Acts-Rev)", "BOM 1 (Nep-Alm)", "BOM 2(Alm-Mor)", "D&C 1 (1-75)", "D&C 2"),
+id <- 10:18)
+colnames(choices_df) <- c("names", "ID")
+
+
+df_Scatter <- data.frame(
+  names <- c("Importance Level", "Belief Level", "Application Level"),
+  id <- 1:3)
+colnames(df_Scatter) <- c("names", "ID")
+
+
+df_Area <- data.frame(
+  names <- areas, 
+  id <- areaInd
+)
+colnames(df_Area) <- c("names", "ID")
+
+m <- as.numeric(str_sub(file_list[keep], 1, -5))
+no_BA <- sort(as.numeric(str_sub(file_list[keep], 1, -5)))
+
+
+m <- subset(test_Ids, !(test_Ids %in% c(11:18)))
+
+no_BA <- data.frame(
+  names <- sort(m), 
+  id <- order(m)
+)
+colnames(no_BA) <- c("names", "ID")
+
+
+```
+
